@@ -46,7 +46,7 @@ SAMPLE_END   = "2021-02-16"
 
 # Universe from wsb_ticker_selection.py (>= 500 dollar-sign mentions, equity only).
 TICKERS       = ["AMC", "BB", "GME", "NOK", "PLTR", "SPCE", "TSLA"]
-TICKER_RENAME = {"IPOA": "SPCE"}   # SPCE traded as IPOA in CRSP before the Sep-2019 merger
+TICKER_RENAME = {"IPOA": "SPCE"}   # SPCE traded as IPOA in CRSP before the Oct-2019 merger
 
 # Event identification (Hasso et al., 2022).
 PERCENTILE   = 0.90   # rolling percentile threshold
