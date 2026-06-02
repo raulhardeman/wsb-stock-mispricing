@@ -4,11 +4,16 @@ WSB event study — Bachelor thesis: Social Media Attention and Stock Mispricing
 Market-model event study (MacKinlay, 1997) on elevated-attention events from
 r/WallStreetBets. Counts daily ticker mentions, flags days above a rolling
 90th-percentile threshold (Hasso et al., 2022), estimates the market model on a
-pre-event window, and computes CARs over [0, +5] and BHARs over [+6, +60].
+pre-event window, computes CARs over [0, +5] and BHARs over [+6, +60], and then
+relates them to firm characteristics in a cross-sectional regression and checks
+their robustness to cross-sectional dependence and return skewness.
 
 Inputs:  r_wallstreetbets_posts.csv, crsp_returns.csv, crsp_market.csv
-Outputs: thesis_results.csv, thesis_results.xlsx, figure1_eventtime.png
+Outputs: thesis_results.csv, thesis_results.xlsx, regression_results.csv,
+         robustness_results.csv, figure1_eventtime.png
 Usage:   python wsb_pipeline_final.py
+
+Dependencies: numpy, pandas, scipy (matplotlib and openpyxl are optional).
 """
 
 import re
@@ -25,27 +30,29 @@ try:
 except ImportError:
     HAS_MATPLOTLIB = False
 
-REDDIT_CSV   = "r_wallstreetbets_posts.csv"
-CRSP_CSV     = "crsp_returns.csv"
-MARKET_CSV   = "crsp_market.csv"
-OUT_MENTIONS = "wsb_mentions_daily.csv"
-OUT_EVENTS   = "wsb_events.csv"
-OUT_CSV      = "thesis_results.csv"
-OUT_EXCEL    = "thesis_results.xlsx"
-OUT_FIGURE   = "figure1_eventtime.png"
+REDDIT_CSV     = "r_wallstreetbets_posts.csv"
+CRSP_CSV       = "crsp_returns.csv"
+MARKET_CSV     = "crsp_market.csv"
+OUT_MENTIONS   = "wsb_mentions_daily.csv"
+OUT_EVENTS     = "wsb_events.csv"
+OUT_CSV        = "thesis_results.csv"
+OUT_EXCEL      = "thesis_results.xlsx"
+OUT_REGRESSION = "regression_results.csv"
+OUT_ROBUSTNESS = "robustness_results.csv"
+OUT_FIGURE     = "figure1_eventtime.png"
 
 SAMPLE_START = "2020-01-01"
 SAMPLE_END   = "2021-02-16"
 
 # Universe from wsb_ticker_selection.py (>= 500 dollar-sign mentions, equity only).
 TICKERS       = ["AMC", "BB", "GME", "NOK", "PLTR", "SPCE", "TSLA"]
-TICKER_RENAME = {"IPOA": "SPCE"}   # SPCE traded as IPOA in CRSP before the Oct-2019 merger
+TICKER_RENAME = {"IPOA": "SPCE"}   # SPCE traded as IPOA in CRSP before the Sep-2019 merger
 
 # Event identification (Hasso et al., 2022).
 PERCENTILE   = 0.90   # rolling percentile threshold
 LOOKBACK     = 250    # lookback window (trading days)
 MIN_OBS      = 30     # min observations before computing the threshold
-MIN_GAP_DAYS = 65     # min spacing between events of the same ticker
+MIN_GAP_DAYS = 65     # min spacing between events of the same ticker (trading days)
 
 # Market model (MacKinlay, 1997).
 EST_WINDOW   = 250    # estimation window length
@@ -54,6 +61,11 @@ MIN_EST_OBS  = 100    # min observations to estimate the model
 CAR_END      = 5      # CAR window [0, +5]
 BHAR_START   = 6      # BHAR window [+6, +60]
 BHAR_END     = 60
+
+# Cross-sectional regression and robustness.
+REGRESSORS   = ["log_attention", "volatility", "log_mktcap"]
+N_BOOTSTRAP  = 10000  # bootstrap resamples
+BOOT_SEED    = 42     # bootstrap RNG seed (reproducibility)
 
 
 def load_reddit():
@@ -101,7 +113,6 @@ def identify_events(mentions):
     panel["date"] = pd.to_datetime(panel["date"])
 
     out = []
-    all_dates_sorted = sorted(all_dates)
     for ticker in TICKERS:
         sub = panel[panel["ticker"] == ticker].sort_values("date").copy()
         sub["p90"] = (sub["mention_count"].shift(1)
@@ -251,6 +262,137 @@ def descriptive_statistics(res):
     return table1
 
 
+def _ols_hc1(y, X):
+    """OLS with HC1 (heteroskedasticity-robust) standard errors.
+
+    X must already contain an intercept column. Returns
+    (params, se, t_stats, p_values, r_squared, n_obs, n_params).
+    """
+    y = np.asarray(y, dtype=float)
+    X = np.asarray(X, dtype=float)
+    n, k = X.shape
+    xtx_inv = np.linalg.inv(X.T @ X)
+    beta = xtx_inv @ X.T @ y
+    resid = y - X @ beta
+
+    # HC1 robust covariance: (X'X)^-1 (sum e_i^2 x_i x_i') (X'X)^-1 * n/(n-k).
+    weighted = X * resid[:, None]
+    cov = xtx_inv @ (weighted.T @ weighted) @ xtx_inv * (n / (n - k))
+    se = np.sqrt(np.diag(cov))
+    t_stats = beta / se
+    p_values = 2 * stats.t.sf(np.abs(t_stats), df=n - k)
+
+    ss_res = float(resid @ resid)
+    ss_tot = float(((y - y.mean()) ** 2).sum())
+    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
+    return beta, se, t_stats, p_values, r2, n, k
+
+
+def cross_sectional_regressions(res, events):
+    """Table 4: regress CAR[0,+5] and BHAR[+6,+60] on event-day attention, pre-event
+    return volatility, and firm size, with HC1 robust standard errors.
+
+    Tests the Baker and Wurgler (2006) prediction that sentiment moves prices most
+    in small, volatile, hard-to-value stocks. Returns a tidy results table.
+    """
+    df = res.merge(events[["event_id", "mention_count"]], on="event_id", how="left")
+    df["log_attention"] = np.log(df["mention_count"].where(df["mention_count"] > 0))
+
+    print("\nTable 4 — Cross-sectional regressions (HC1 robust SE)")
+    out = []
+    for dep, name in [("car_0_5", "CAR [0,+5]"), ("bhar_6_60", "BHAR [+6,+60]")]:
+        d = df.dropna(subset=[dep] + REGRESSORS)
+        if len(d) <= len(REGRESSORS) + 1:
+            print(f"  {name}: insufficient observations (N={len(d)})")
+            continue
+        X = np.column_stack([np.ones(len(d)), d[REGRESSORS].values])
+        beta, se, t_stats, p_values, r2, n, _ = _ols_hc1(d[dep].values, X)
+
+        print(f"  {name} (N={n})")
+        for label, b, t, p in zip(["const"] + REGRESSORS, beta, t_stats, p_values):
+            stars = "***" if p < 0.01 else "**" if p < 0.05 else "*" if p < 0.10 else ""
+            print(f"    {label:<14} coef={b:+.4f}  t={t:+.3f}{stars:<3} p={p:.4f}")
+            out.append({"model": name, "variable": label, "coef": round(float(b), 6),
+                        "t_stat": round(float(t), 4), "p_value": round(float(p), 4)})
+        print(f"    {'R-squared':<14} {r2:.4f}")
+        out.append({"model": name, "variable": "R-squared", "coef": round(float(r2), 4),
+                    "t_stat": np.nan, "p_value": np.nan})
+        out.append({"model": name, "variable": "N", "coef": n,
+                    "t_stat": np.nan, "p_value": np.nan})
+    return pd.DataFrame(out)
+
+
+def _calendar_time_portfolio(res, crsp, day_start=0, day_end=CAR_END):
+    """Equal-weighted calendar-time portfolio over the [day_start, day_end] window.
+
+    Averaging same-date abnormal returns into a single portfolio observation removes
+    the cross-sectional correlation that inflates the simple cross-sectional t-test.
+    Returns (mean_ar, t_stat, p_value, n_trading_days).
+    """
+    recs = []
+    for _, e in res.iterrows():
+        stock = crsp[crsp["ticker"] == e["ticker"]].set_index("date").sort_index()
+        dates = list(stock.index)
+        try:
+            pos = dates.index(pd.to_datetime(e["event_date"]))
+        except ValueError:
+            continue
+        for d in range(day_start, day_end + 1):
+            p = pos + d
+            if 0 <= p < len(dates):
+                row = stock.iloc[p]
+                recs.append({"date": dates[p],
+                             "ar": row["ret"] - (e["alpha"] + e["beta"] * row["mkt_ret"])})
+    if not recs:
+        return np.nan, np.nan, np.nan, 0
+    port = pd.DataFrame(recs).groupby("date")["ar"].mean()
+    t, p = stats.ttest_1samp(port, 0)
+    return float(port.mean()), float(t), float(p), len(port)
+
+
+def _bootstrap_mean(series, n_boot=N_BOOTSTRAP, seed=BOOT_SEED):
+    """Skew-robust test of H0: mean = 0 via a bootstrap of the centred sample,
+    plus a percentile 95% confidence interval. Returns (mean, p, ci_low, ci_high, n).
+    """
+    x = series.dropna().to_numpy()
+    if len(x) < 2:
+        return (float(x.mean()) if len(x) else np.nan), np.nan, np.nan, np.nan, len(x)
+    m = x.mean()
+    rng = np.random.default_rng(seed)
+    null = rng.choice(x - m, size=(n_boot, len(x)), replace=True).mean(axis=1)
+    p = float((np.abs(null) >= abs(m)).mean())
+    boot = rng.choice(x, size=(n_boot, len(x)), replace=True).mean(axis=1)
+    lo, hi = np.percentile(boot, [2.5, 97.5])
+    return float(m), p, float(lo), float(hi), len(x)
+
+
+def robustness_tests(res, crsp):
+    """Robustness for the headline means: a calendar-time portfolio over the CAR
+    window (addresses cross-sectional dependence) and a skew-robust bootstrap for
+    both CAR and BHAR. Returns a summary table.
+    """
+    print("\nRobustness — dependence- and skew-robust inference")
+    out = []
+
+    ct_mean, ct_t, ct_p, ct_n = _calendar_time_portfolio(res, crsp)
+    print(f"  Calendar-time portfolio [0,+{CAR_END}]: "
+          f"daily mean AR={ct_mean*100:+.3f}%  t={ct_t:+.3f}  p={ct_p:.4f}  (obs={ct_n})")
+    out.append({"test": "calendar_time_portfolio", "series": f"AR [0,+{CAR_END}]",
+                "mean_pct": round(ct_mean * 100, 4), "t_stat": round(ct_t, 4),
+                "p_value": round(ct_p, 4), "ci_low_pct": np.nan, "ci_high_pct": np.nan,
+                "n": ct_n})
+
+    for col, name in [("car_0_5", "CAR [0,+5]"), ("bhar_6_60", "BHAR [+6,+60]")]:
+        m, p, lo, hi, n = _bootstrap_mean(res[col])
+        print(f"  Bootstrap {name}: mean={m*100:+.2f}%  p={p:.4f}  "
+              f"95% CI=[{lo*100:+.2f}%, {hi*100:+.2f}%]  (n={n}, {N_BOOTSTRAP} resamples)")
+        out.append({"test": "bootstrap", "series": name, "mean_pct": round(m * 100, 4),
+                    "t_stat": np.nan, "p_value": round(p, 4),
+                    "ci_low_pct": round(lo * 100, 4), "ci_high_pct": round(hi * 100, 4),
+                    "n": n})
+    return pd.DataFrame(out)
+
+
 def plot_event_time(crsp, events):
     """Figure 1: cumulative average abnormal return in event time, day -5 to +60."""
     if not HAS_MATPLOTLIB:
@@ -305,14 +447,19 @@ def plot_event_time(crsp, events):
     plt.close()
 
 
-def export_results(res, table1):
+def export_results(res, table1, reg_table, robust_table):
+    """Write all results to CSV, and to a multi-sheet workbook when openpyxl is present."""
     res.to_csv(OUT_CSV, index=False)
+    reg_table.to_csv(OUT_REGRESSION, index=False)
+    robust_table.to_csv(OUT_ROBUSTNESS, index=False)
     try:
         with pd.ExcelWriter(OUT_EXCEL, engine="openpyxl") as writer:
             res.to_excel(writer, sheet_name="Events", index=False)
             table1.to_excel(writer, sheet_name="Table1", index=False)
+            reg_table.to_excel(writer, sheet_name="Table4_Regression", index=False)
+            robust_table.to_excel(writer, sheet_name="Robustness", index=False)
     except ModuleNotFoundError:
-        pass  # openpyxl not installed; CSV is still written
+        pass  # openpyxl not installed; CSV files are still written
 
 
 def main():
@@ -320,13 +467,17 @@ def main():
     events = identify_events(mentions)
     crsp = load_crsp()
     res = compute_abnormal_returns(events, crsp)
+
     table1 = descriptive_statistics(res)
+    reg_table = cross_sectional_regressions(res, events)
+    robust_table = robustness_tests(res, crsp)
+
     plot_event_time(crsp, events)
-    export_results(res, table1)
+    export_results(res, table1, reg_table, robust_table)
 
     print(f"\nSample: {res['car_0_5'].notna().sum()} CAR events, "
           f"{res['bhar_6_60'].notna().sum()} BHAR events")
-    print(f"Saved: {OUT_CSV}, {OUT_EXCEL}, {OUT_FIGURE}")
+    print(f"Saved: {OUT_CSV}, {OUT_EXCEL}, {OUT_REGRESSION}, {OUT_ROBUSTNESS}, {OUT_FIGURE}")
 
 
 if __name__ == "__main__":
