@@ -66,16 +66,19 @@ def load_reddit():
 
 
 def build_mentions(df):
-    """Count daily mentions per ticker, matching both $GME and standalone GME."""
-    pat = (r"\$(" + "|".join(map(re.escape, TICKERS)) + r")\b"
-           + r"|\b(" + "|".join(map(re.escape, TICKERS)) + r")\b")
-    ticker_re = re.compile(pat)
+    """Count daily mentions per ticker as the number of distinct posts that mention it.
+
+    Only dollar-sign mentions ($GME) are matched, and a post counts once per ticker
+    regardless of how many times that ticker appears in its title.
+    """
+    ticker_re = re.compile(r"\$(" + "|".join(map(re.escape, TICKERS)) + r")\b")
 
     counts = defaultdict(int)
     for _, row in df.iterrows():
         day = row["date"].date()
-        for m in ticker_re.finditer(str(row["title"]).upper()):
-            counts[(day, m.group(1) or m.group(2))] += 1
+        tickers_in_post = {m.group(1) for m in ticker_re.finditer(str(row["title"]).upper())}
+        for ticker in tickers_in_post:
+            counts[(day, ticker)] += 1
 
     mentions = pd.DataFrame(
         [{"date": d, "ticker": t, "mention_count": c} for (d, t), c in counts.items()]
@@ -98,6 +101,7 @@ def identify_events(mentions):
     panel["date"] = pd.to_datetime(panel["date"])
 
     out = []
+    all_dates_sorted = sorted(all_dates)
     for ticker in TICKERS:
         sub = panel[panel["ticker"] == ticker].sort_values("date").copy()
         sub["p90"] = (sub["mention_count"].shift(1)
@@ -105,12 +109,14 @@ def identify_events(mentions):
                                           .quantile(PERCENTILE))
         sub["elevated"] = (sub["mention_count"] > sub["p90"]).astype(int)
 
-        # Keep only the first day of each cluster, spaced >= MIN_GAP_DAYS apart.
-        last, flags = None, []
-        for _, row in sub.iterrows():
-            if row["elevated"] and (last is None or (row["date"] - last).days >= MIN_GAP_DAYS):
+        # Keep only the first day of each cluster, spaced >= MIN_GAP_DAYS *trading*
+        # days apart. Spacing is measured in row positions, not calendar days.
+        sub = sub.reset_index(drop=True)
+        last_pos, flags = None, []
+        for pos, row in sub.iterrows():
+            if row["elevated"] and (last_pos is None or (pos - last_pos) >= MIN_GAP_DAYS):
                 flags.append(1)
-                last = row["date"]
+                last_pos = pos
             else:
                 flags.append(0)
         sub["elevated"] = flags
