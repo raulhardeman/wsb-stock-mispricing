@@ -2,18 +2,42 @@
 WSB event study — Bachelor thesis: Social Media Attention and Stock Mispricing.
 
 Market-model event study (MacKinlay, 1997) on elevated-attention events from
-r/WallStreetBets. Counts daily ticker mentions, flags days above a rolling
-90th-percentile threshold (Hasso et al., 2022), estimates the market model on a
-pre-event window, computes CARs over [0, +5] and BHARs over [+6, +60], and then
-relates them to firm characteristics in a cross-sectional regression and checks
-their robustness to cross-sectional dependence and return skewness.
+r/WallStreetBets. The script:
+  1. counts daily dollar-sign ticker mentions and flags days above a rolling
+     90th-percentile threshold (Hasso et al., 2022) as attention events;
+  2. estimates the market model on a pre-event window and computes CARs over
+     [0, +5] and BHARs over [+6, +60];
+  3. reports descriptive statistics and one-sample t-tests (Tables 1-3);
+  4. checks the short-run result against cross-sectional dependence
+     (calendar-time portfolio, Fama 1998) and return skewness (bootstrap,
+     Lyon, Barber & Tsai 1999);
+  5. repeats the headline analysis on the sample excluding GameStop (Table 5);
+  6. draws Figure 1 (cumulative average abnormal return) and Figure 2
+     (per-ticker CAR/BHAR with and without GameStop).
 
-Inputs:  r_wallstreetbets_posts.csv, crsp_returns.csv, crsp_market.csv
-Outputs: thesis_results.csv, thesis_results.xlsx, regression_results.csv,
-         robustness_results.csv, figure1_eventtime.png
-Usage:   python wsb_pipeline_final.py
+Inputs:  r_wallstreetbets_posts.csv (raw Reddit posts, Kaggle; see README) or, if the
+         raw file is absent, the derived snapshot wsb_mentions_daily.csv;
+         crsp_returns.csv and crsp_market.csv (CRSP via WRDS, not redistributed).
+Outputs: wsb_mentions_daily.csv and wsb_events.csv (derived snapshots, written when
+         built from the raw file), thesis_results.csv, figure1_eventtime.png,
+         figure2_decomposition.png
+Usage:   python wsb_event_study.py
 
-Dependencies: numpy, pandas, scipy (matplotlib and openpyxl are optional).
+Dependencies: numpy, pandas, scipy (matplotlib optional, for the figures).
+
+Reproducibility notes:
+  * Mention counts here are distinct posts per ticker-day. The universe screen in
+    wsb_ticker_selection.py counts mention occurrences, so its totals (e.g. GME
+    15,679) sit slightly above the post counts reported in the thesis (GME 15,344).
+    Both totals are correct; they answer different questions.
+  * identify_events() places the daily counts on a Monday-to-Friday grid
+    (pd.bdate_range). Weekend mentions appear in wsb_mentions_daily.csv but do
+    not enter the threshold or the event definition. A flagged day that falls
+    on a market holiday takes the next CRSP trading day as event day 0.
+  * The minimum spacing between same-ticker events (MIN_GAP_DAYS) is measured in
+    rows of that weekday grid, which includes market holidays.
+  * The bootstrap uses a fixed seed (BOOT_SEED), so all reported p-values and
+    confidence intervals reproduce exactly.
 """
 
 import re
@@ -30,23 +54,23 @@ try:
 except ImportError:
     HAS_MATPLOTLIB = False
 
-REDDIT_CSV     = "r_wallstreetbets_posts.csv"
-CRSP_CSV       = "crsp_returns.csv"
-MARKET_CSV     = "crsp_market.csv"
-OUT_MENTIONS   = "wsb_mentions_daily.csv"
-OUT_EVENTS     = "wsb_events.csv"
-OUT_CSV        = "thesis_results.csv"
-OUT_EXCEL      = "thesis_results.xlsx"
-OUT_REGRESSION = "regression_results.csv"
-OUT_ROBUSTNESS = "robustness_results.csv"
-OUT_FIGURE     = "figure1_eventtime.png"
+# Input and output files.
+REDDIT_CSV    = "r_wallstreetbets_posts.csv"
+CRSP_CSV      = "crsp_returns.csv"
+MARKET_CSV    = "crsp_market.csv"
+MENTIONS_CSV  = "wsb_mentions_daily.csv"   # derived snapshot, fallback input
+EVENTS_CSV    = "wsb_events.csv"           # derived snapshot
+OUT_CSV       = "thesis_results.csv"
+OUT_FIG_EVT   = "figure1_eventtime.png"
+OUT_FIG_DECOMP = "figure2_decomposition.png"
 
 SAMPLE_START = "2020-01-01"
 SAMPLE_END   = "2021-02-16"
 
 # Universe from wsb_ticker_selection.py (>= 500 dollar-sign mentions, equity only).
 TICKERS       = ["AMC", "BB", "GME", "NOK", "PLTR", "SPCE", "TSLA"]
-TICKER_RENAME = {"IPOA": "SPCE"}   # SPCE traded as IPOA in CRSP before the Oct-2019 merger
+TICKER_RENAME = {"IPOA": "SPCE"}   # SPCE traded as IPOA in CRSP before the 2019 merger
+DROP_TICKER   = "GME"              # ticker excluded in the robustness check (Section 5.4)
 
 # Event identification (Hasso et al., 2022).
 PERCENTILE   = 0.90   # rolling percentile threshold
@@ -62,12 +86,14 @@ CAR_END      = 5      # CAR window [0, +5]
 BHAR_START   = 6      # BHAR window [+6, +60]
 BHAR_END     = 60
 
-# Cross-sectional regression and robustness.
-REGRESSORS   = ["log_attention", "volatility", "log_mktcap"]
+# Robustness (calendar-time portfolio and bootstrap).
 N_BOOTSTRAP  = 10000  # bootstrap resamples
 BOOT_SEED    = 42     # bootstrap RNG seed (reproducibility)
 
 
+# --------------------------------------------------------------------------- #
+# Data loading and event identification
+# --------------------------------------------------------------------------- #
 def load_reddit():
     if not Path(REDDIT_CSV).exists():
         sys.exit(f"Error: {REDDIT_CSV} not found.")
@@ -96,9 +122,29 @@ def build_mentions(df):
         [{"date": d, "ticker": t, "mention_count": c} for (d, t), c in counts.items()]
     )
     mentions["date"] = pd.to_datetime(mentions["date"])
-    mentions = mentions.sort_values(["date", "ticker"]).reset_index(drop=True)
-    mentions.to_csv(OUT_MENTIONS, index=False)
-    return mentions
+    return mentions.sort_values(["date", "ticker"]).reset_index(drop=True)
+
+
+def load_or_build_mentions():
+    """Return the daily mention counts, preferring the raw Reddit file.
+
+    If r_wallstreetbets_posts.csv is present, mentions are built from it and the
+    snapshot wsb_mentions_daily.csv is (re)written. If the raw file is absent,
+    the snapshot is loaded instead, so the event study reproduces without the
+    raw Kaggle file (about 220 MB). Both routes give identical results.
+    """
+    if Path(REDDIT_CSV).exists():
+        mentions = build_mentions(load_reddit())
+        mentions.to_csv(MENTIONS_CSV, index=False, date_format="%Y-%m-%d")
+        print(f"Built mentions from {REDDIT_CSV}; snapshot saved to {MENTIONS_CSV}")
+        return mentions
+    if Path(MENTIONS_CSV).exists():
+        mentions = pd.read_csv(MENTIONS_CSV, parse_dates=["date"])
+        print(f"{REDDIT_CSV} not found; loaded snapshot {MENTIONS_CSV} "
+              f"({len(mentions)} ticker-day rows)")
+        return mentions.sort_values(["date", "ticker"]).reset_index(drop=True)
+    sys.exit(f"Error: neither {REDDIT_CSV} nor {MENTIONS_CSV} found. "
+             f"See README.md for how to obtain the data.")
 
 
 def identify_events(mentions):
@@ -136,7 +182,6 @@ def identify_events(mentions):
     panel = pd.concat(out, ignore_index=True)
     events = panel[panel["elevated"] == 1].copy()
     events["event_id"] = range(1, len(events) + 1)
-    events.to_csv(OUT_EVENTS, index=False)
     return events
 
 
@@ -163,6 +208,9 @@ def load_crsp():
     return crsp.sort_values(["ticker", "date"]).reset_index(drop=True)
 
 
+# --------------------------------------------------------------------------- #
+# Event-study core
+# --------------------------------------------------------------------------- #
 def compute_abnormal_returns(events, crsp):
     """Estimate the market model per event and compute CAR[0,+5] and BHAR[+6,+60].
 
@@ -207,126 +255,37 @@ def compute_abnormal_returns(events, crsp):
         vol_w = stock.iloc[max(0, pos - 60):pos]
         volatility = float(vol_w["ret"].std()) if len(vol_w) >= 20 else np.nan
 
-        log_mktcap = np.nan
-        if {"prc", "shrout"}.issubset(stock.columns):
-            last = stock.iloc[pos]
-            mc = abs(last["prc"]) * last["shrout"] * 1000
-            log_mktcap = float(np.log(mc)) if mc > 0 else np.nan
-
         rows.append({
             "event_id": event["event_id"], "ticker": ticker,
             "event_date": future[0], "alpha": round(alpha, 6), "beta": round(beta, 4),
             "n_est_days": len(est), "car_0_5": round(car, 6),
             "bhar_6_60": round(bhar, 6) if not np.isnan(bhar) else np.nan,
             "volatility": round(volatility, 6) if not np.isnan(volatility) else np.nan,
-            "log_mktcap": round(log_mktcap, 4) if not np.isnan(log_mktcap) else np.nan,
         })
     return pd.DataFrame(rows)
 
 
+# --------------------------------------------------------------------------- #
+# Inference helpers
+# --------------------------------------------------------------------------- #
 def _ttest(series, label):
+    """One-sample t-test of H0: mean = 0, printed in a fixed-width row."""
     s = series.dropna()
     if len(s) < 2:
-        print(f"  {label:<13} N={len(s):>2}  (insufficient)")
+        print(f"  {label:<17} N={len(s):>2}  (insufficient)")
         return
     t, p = stats.ttest_1samp(s, 0)
     stars = "***" if p < 0.01 else "**" if p < 0.05 else "*" if p < 0.10 else ""
-    print(f"  {label:<13} N={len(s):>2}  mean={s.mean()*100:+.2f}%  t={t:+.3f}{stars:<3} p={p:.4f}")
-
-
-def descriptive_statistics(res):
-    """Print Table 1 (descriptives) and Tables 2-3 (CAR/BHAR t-tests)."""
-    table1 = []
-    for col, label, pct in [("car_0_5", "CAR [0,+5] (%)", True),
-                            ("bhar_6_60", "BHAR [+6,+60] (%)", True),
-                            ("volatility", "Return Volatility", False),
-                            ("log_mktcap", "Log Market Cap", False)]:
-        s = res[col].dropna() * (100 if pct else 1)
-        table1.append({"Variable": label, "N": len(s), "Mean": round(s.mean(), 4),
-                       "Median": round(s.median(), 4), "Std Dev": round(s.std(), 4),
-                       "P10": round(s.quantile(.10), 4), "P90": round(s.quantile(.90), 4)})
-    table1 = pd.DataFrame(table1)
-
-    print("\nTable 1 — Descriptive statistics")
-    print(table1.to_string(index=False))
-
-    print("\nTable 2 — Mean CAR [0,+5]")
-    _ttest(res["car_0_5"], "Full sample")
-    for t in TICKERS:
-        _ttest(res.loc[res["ticker"] == t, "car_0_5"], t)
-
-    print("\nTable 3 — Mean BHAR [+6,+60]")
-    _ttest(res["bhar_6_60"], "Full sample")
-    for t in TICKERS:
-        _ttest(res.loc[res["ticker"] == t, "bhar_6_60"], t)
-    return table1
-
-
-def _ols_hc1(y, X):
-    """OLS with HC1 (heteroskedasticity-robust) standard errors.
-
-    X must already contain an intercept column. Returns
-    (params, se, t_stats, p_values, r_squared, n_obs, n_params).
-    """
-    y = np.asarray(y, dtype=float)
-    X = np.asarray(X, dtype=float)
-    n, k = X.shape
-    xtx_inv = np.linalg.inv(X.T @ X)
-    beta = xtx_inv @ X.T @ y
-    resid = y - X @ beta
-
-    # HC1 robust covariance: (X'X)^-1 (sum e_i^2 x_i x_i') (X'X)^-1 * n/(n-k).
-    weighted = X * resid[:, None]
-    cov = xtx_inv @ (weighted.T @ weighted) @ xtx_inv * (n / (n - k))
-    se = np.sqrt(np.diag(cov))
-    t_stats = beta / se
-    p_values = 2 * stats.t.sf(np.abs(t_stats), df=n - k)
-
-    ss_res = float(resid @ resid)
-    ss_tot = float(((y - y.mean()) ** 2).sum())
-    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
-    return beta, se, t_stats, p_values, r2, n, k
-
-
-def cross_sectional_regressions(res, events):
-    """Table 4: regress CAR[0,+5] and BHAR[+6,+60] on event-day attention, pre-event
-    return volatility, and firm size, with HC1 robust standard errors.
-
-    Tests the Baker and Wurgler (2006) prediction that sentiment moves prices most
-    in small, volatile, hard-to-value stocks. Returns a tidy results table.
-    """
-    df = res.merge(events[["event_id", "mention_count"]], on="event_id", how="left")
-    df["log_attention"] = np.log(df["mention_count"].where(df["mention_count"] > 0))
-
-    print("\nTable 4 — Cross-sectional regressions (HC1 robust SE)")
-    out = []
-    for dep, name in [("car_0_5", "CAR [0,+5]"), ("bhar_6_60", "BHAR [+6,+60]")]:
-        d = df.dropna(subset=[dep] + REGRESSORS)
-        if len(d) <= len(REGRESSORS) + 1:
-            print(f"  {name}: insufficient observations (N={len(d)})")
-            continue
-        X = np.column_stack([np.ones(len(d)), d[REGRESSORS].values])
-        beta, se, t_stats, p_values, r2, n, _ = _ols_hc1(d[dep].values, X)
-
-        print(f"  {name} (N={n})")
-        for label, b, t, p in zip(["const"] + REGRESSORS, beta, t_stats, p_values):
-            stars = "***" if p < 0.01 else "**" if p < 0.05 else "*" if p < 0.10 else ""
-            print(f"    {label:<14} coef={b:+.4f}  t={t:+.3f}{stars:<3} p={p:.4f}")
-            out.append({"model": name, "variable": label, "coef": round(float(b), 6),
-                        "t_stat": round(float(t), 4), "p_value": round(float(p), 4)})
-        print(f"    {'R-squared':<14} {r2:.4f}")
-        out.append({"model": name, "variable": "R-squared", "coef": round(float(r2), 4),
-                    "t_stat": np.nan, "p_value": np.nan})
-        out.append({"model": name, "variable": "N", "coef": n,
-                    "t_stat": np.nan, "p_value": np.nan})
-    return pd.DataFrame(out)
+    print(f"  {label:<17} N={len(s):>2}  mean={s.mean()*100:+.2f}%  t={t:+.3f}{stars:<3} p={p:.4f}")
 
 
 def _calendar_time_portfolio(res, crsp, day_start=0, day_end=CAR_END):
     """Equal-weighted calendar-time portfolio over the [day_start, day_end] window.
 
     Averaging same-date abnormal returns into a single portfolio observation removes
-    the cross-sectional correlation that inflates the simple cross-sectional t-test.
+    the cross-sectional correlation that inflates the simple cross-sectional t-test
+    (Fama, 1998). Operates on whatever event set is passed, so the same function
+    serves both the full sample and the excluding-GME sample.
     Returns (mean_ar, t_stat, p_value, n_trading_days).
     """
     recs = []
@@ -352,7 +311,8 @@ def _calendar_time_portfolio(res, crsp, day_start=0, day_end=CAR_END):
 
 def _bootstrap_mean(series, n_boot=N_BOOTSTRAP, seed=BOOT_SEED):
     """Skew-robust test of H0: mean = 0 via a bootstrap of the centred sample,
-    plus a percentile 95% confidence interval. Returns (mean, p, ci_low, ci_high, n).
+    plus a percentile 95% confidence interval (Lyon, Barber & Tsai, 1999).
+    Returns (mean, p, ci_low, ci_high, n).
     """
     x = series.dropna().to_numpy()
     if len(x) < 2:
@@ -366,33 +326,68 @@ def _bootstrap_mean(series, n_boot=N_BOOTSTRAP, seed=BOOT_SEED):
     return float(m), p, float(lo), float(hi), len(x)
 
 
-def robustness_tests(res, crsp):
-    """Robustness for the headline means: a calendar-time portfolio over the CAR
-    window (addresses cross-sectional dependence) and a skew-robust bootstrap for
-    both CAR and BHAR. Returns a summary table.
+# --------------------------------------------------------------------------- #
+# Tables
+# --------------------------------------------------------------------------- #
+def descriptive_statistics(res):
+    """Table 1 (descriptives) and Tables 2-3 (CAR/BHAR t-tests, full sample)."""
+    table1 = []
+    for col, label, pct in [("car_0_5", "CAR [0,+5] (%)", True),
+                            ("bhar_6_60", "BHAR [+6,+60] (%)", True),
+                            ("volatility", "Return Volatility", False)]:
+        s = res[col].dropna() * (100 if pct else 1)
+        table1.append({"Variable": label, "N": len(s), "Mean": round(s.mean(), 4),
+                       "Median": round(s.median(), 4), "Std Dev": round(s.std(), 4),
+                       "P10": round(s.quantile(.10), 4), "P90": round(s.quantile(.90), 4)})
+
+    print("\nTable 1 — Descriptive statistics")
+    print(pd.DataFrame(table1).to_string(index=False))
+
+    print("\nTable 2 — Mean CAR [0,+5]")
+    _ttest(res["car_0_5"], "Full sample")
+    for t in TICKERS:
+        _ttest(res.loc[res["ticker"] == t, "car_0_5"], t)
+
+    print("\nTable 3 — Mean BHAR [+6,+60]")
+    _ttest(res["bhar_6_60"], "Full sample")
+    for t in TICKERS:
+        _ttest(res.loc[res["ticker"] == t, "bhar_6_60"], t)
+
+
+def robustness_tests(res, crsp, label="full sample"):
+    """Calendar-time portfolio (cross-sectional dependence) and bootstrap (return
+    skewness) for the CAR and BHAR means of whatever event set is passed.
     """
-    print("\nRobustness — dependence- and skew-robust inference")
-    out = []
+    print(f"\nRobustness ({label}) — dependence- and skew-robust inference")
 
     ct_mean, ct_t, ct_p, ct_n = _calendar_time_portfolio(res, crsp)
     print(f"  Calendar-time portfolio [0,+{CAR_END}]: "
           f"daily mean AR={ct_mean*100:+.3f}%  t={ct_t:+.3f}  p={ct_p:.4f}  (obs={ct_n})")
-    out.append({"test": "calendar_time_portfolio", "series": f"AR [0,+{CAR_END}]",
-                "mean_pct": round(ct_mean * 100, 4), "t_stat": round(ct_t, 4),
-                "p_value": round(ct_p, 4), "ci_low_pct": np.nan, "ci_high_pct": np.nan,
-                "n": ct_n})
 
     for col, name in [("car_0_5", "CAR [0,+5]"), ("bhar_6_60", "BHAR [+6,+60]")]:
         m, p, lo, hi, n = _bootstrap_mean(res[col])
         print(f"  Bootstrap {name}: mean={m*100:+.2f}%  p={p:.4f}  "
               f"95% CI=[{lo*100:+.2f}%, {hi*100:+.2f}%]  (n={n}, {N_BOOTSTRAP} resamples)")
-        out.append({"test": "bootstrap", "series": name, "mean_pct": round(m * 100, 4),
-                    "t_stat": np.nan, "p_value": round(p, 4),
-                    "ci_low_pct": round(lo * 100, 4), "ci_high_pct": round(hi * 100, 4),
-                    "n": n})
-    return pd.DataFrame(out)
 
 
+def excluding_gme(res, crsp):
+    """Table 5: repeat the headline means and the robustness tests on the sample
+    that excludes GameStop, to check the short-run result is not a GME artefact.
+    """
+    res_x = res[res["ticker"] != DROP_TICKER]
+
+    print("\nMean abnormal returns — full sample vs excluding GME")
+    _ttest(res["car_0_5"], "CAR [0,+5] full")
+    _ttest(res_x["car_0_5"], "CAR [0,+5] ex-GME")
+    _ttest(res["bhar_6_60"], "BHAR [+6,+60] full")
+    _ttest(res_x["bhar_6_60"], "BHAR [+6,+60] ex-GME")
+
+    robustness_tests(res_x, crsp, label="excluding GME")
+
+
+# --------------------------------------------------------------------------- #
+# Figures
+# --------------------------------------------------------------------------- #
 def plot_event_time(crsp, events):
     """Figure 1: cumulative average abnormal return in event time, day -5 to +60."""
     if not HAS_MATPLOTLIB:
@@ -443,42 +438,79 @@ def plot_event_time(crsp, events):
     ax.legend(fontsize=9)
     ax.grid(axis="y", alpha=0.3)
     plt.tight_layout()
-    plt.savefig(OUT_FIGURE, dpi=150, bbox_inches="tight")
+    plt.savefig(OUT_FIG_EVT, dpi=150, bbox_inches="tight")
     plt.close()
 
 
-def export_results(res, table1, reg_table, robust_table):
-    """Write all results to CSV, and to a multi-sheet workbook when openpyxl is present."""
-    res.to_csv(OUT_CSV, index=False)
-    reg_table.to_csv(OUT_REGRESSION, index=False)
-    robust_table.to_csv(OUT_ROBUSTNESS, index=False)
-    try:
-        with pd.ExcelWriter(OUT_EXCEL, engine="openpyxl") as writer:
-            res.to_excel(writer, sheet_name="Events", index=False)
-            table1.to_excel(writer, sheet_name="Table1", index=False)
-            reg_table.to_excel(writer, sheet_name="Table4_Regression", index=False)
-            robust_table.to_excel(writer, sheet_name="Robustness", index=False)
-    except ModuleNotFoundError:
-        pass  # openpyxl not installed; CSV files are still written
+def plot_decomposition(res):
+    """Figure 2: per-ticker mean CAR and BHAR, GME highlighted, with full-sample and
+    excluding-GME mean reference lines and +/- 1 standard-error whiskers.
+    """
+    if not HAS_MATPLOTLIB:
+        return
+    order = [t for t in TICKERS if t != "PLTR" and (res["ticker"] == t).any()]
+    grey, grey_e, red, red_e, ink = "#9a9a9a", "#6f6f6f", "#b23a48", "#7d2832", "#1a1a1a"
+
+    def by(col):
+        d = {}
+        for tk in order:
+            s = res.loc[res["ticker"] == tk, col].dropna()
+            d[tk] = (len(s), s.mean()*100, (s.std()/np.sqrt(len(s))*100) if len(s) >= 2 else np.nan)
+        full = res[col].dropna().mean()*100
+        ex = res.loc[res["ticker"] != DROP_TICKER, col].dropna().mean()*100
+        return d, full, ex
+
+    def panel(ax, col, title, ylab):
+        d, full, ex = by(col)
+        xs = np.arange(len(order)); means = [d[t][1] for t in order]; ses = [d[t][2] for t in order]
+        edges = [red_e if t == DROP_TICKER else grey_e for t in order]
+        colors = [red if t == DROP_TICKER else grey for t in order]
+        ax.bar(xs, means, color=colors, edgecolor=edges, linewidth=1.1, width=0.66, zorder=3)
+        for xi, m, se, t in zip(xs, means, ses, order):
+            if not np.isnan(se):
+                ax.errorbar(xi, m, yerr=se, fmt="none", ecolor=edges[order.index(t)],
+                            elinewidth=1.0, capsize=3, capthick=1.0, zorder=4)
+        ax.axhline(0, color=ink, linewidth=0.9, zorder=2)
+        ax.axhline(full, color="#555", linewidth=1.3, zorder=2, label=f"Full-sample mean ({full:+.2f}%)")
+        ax.axhline(ex, color=ink, linewidth=1.4, linestyle=(0, (5, 3)), zorder=2,
+                   label=f"Excl. {DROP_TICKER} mean ({ex:+.2f}%)")
+        ax.set_xticks(xs); ax.set_xticklabels(order, fontsize=10.5)
+        ax.set_title(title, fontsize=12, fontweight="bold", pad=10)
+        ax.set_ylabel(ylab, fontsize=10.5); ax.tick_params(axis="y", labelsize=9.5)
+        ax.spines[["top", "right"]].set_visible(False); ax.spines[["left", "bottom"]].set_color("#888")
+        ax.grid(axis="y", color="#e3e3e3", linewidth=0.8, zorder=0)
+        ax.legend(fontsize=8.6, frameon=False, loc="upper left")
+
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 4.6))
+    panel(a1, "car_0_5", "Mean CAR [0, +5] by ticker", "Cumulative abnormal return (%)")
+    panel(a2, "bhar_6_60", "Mean BHAR [+6, +60] by ticker", "Buy-and-hold abnormal return (%)")
+    plt.tight_layout()
+    plt.savefig(OUT_FIG_DECOMP, dpi=200, bbox_inches="tight", facecolor="white")
+    plt.close()
 
 
+# --------------------------------------------------------------------------- #
+# Main
+# --------------------------------------------------------------------------- #
 def main():
-    mentions = build_mentions(load_reddit())
-    events = identify_events(mentions)
     crsp = load_crsp()
+    events = identify_events(load_or_build_mentions())
+    events.to_csv(EVENTS_CSV, index=False, date_format="%Y-%m-%d")
     res = compute_abnormal_returns(events, crsp)
 
-    table1 = descriptive_statistics(res)
-    reg_table = cross_sectional_regressions(res, events)
-    robust_table = robustness_tests(res, crsp)
+    descriptive_statistics(res)                  # Tables 1, 2, 3
+    robustness_tests(res, crsp, "full sample")   # Section 5.3
+    excluding_gme(res, crsp)                     # Section 5.4 (Table 5)
 
-    plot_event_time(crsp, events)
-    export_results(res, table1, reg_table, robust_table)
+    plot_event_time(crsp, events)                # Figure 1
+    plot_decomposition(res)                      # Figure 2
 
+    res.to_csv(OUT_CSV, index=False)
     print(f"\nSample: {res['car_0_5'].notna().sum()} CAR events, "
           f"{res['bhar_6_60'].notna().sum()} BHAR events")
-    print(f"Saved: {OUT_CSV}, {OUT_EXCEL}, {OUT_REGRESSION}, {OUT_ROBUSTNESS}, {OUT_FIGURE}")
+    print(f"Saved: {EVENTS_CSV}, {OUT_CSV}, {OUT_FIG_EVT}, {OUT_FIG_DECOMP}")
 
 
 if __name__ == "__main__":
     main()
+
