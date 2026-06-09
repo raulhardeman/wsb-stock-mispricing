@@ -39,14 +39,9 @@ not redistributed in this repository. Download them yourself with a WRDS account
   (value-weighted market return including dividends).
 
 Column names are lowercased by the code, so capitalisation does not matter.
-**Do not commit the CRSP files to a public repository.** A suitable `.gitignore`:
-
-```
-r_wallstreetbets_posts.csv
-crsp_returns.csv
-crsp_market.csv
-__pycache__/
-```
+**Do not commit the CRSP files to a public repository.** The repository's
+`.gitignore` keeps `r_wallstreetbets_posts.csv`, `crsp_returns.csv` and
+`crsp_market.csv` out of version control.
 
 ## How to run
 
