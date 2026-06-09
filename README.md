@@ -1,57 +1,85 @@
-# Social Media Attention and Stock Mispricing
+# Social Media Attention and Stock Mispricing: Evidence from r/WallStreetBets
 
-Code for the bachelor thesis *Social Media Attention and Stock Mispricing: Evidence from r/WallStreetBets* (BSc Economics & Business Economics, Financial Economics, Erasmus School of Economics).
+Replication code and derived data for the bachelor thesis by Raul Hardeman
+(Erasmus School of Economics, BSc Economics & Business Economics, June 2026).
 
-The project tests whether coordinated retail attention on r/WallStreetBets drives stock prices away from fundamental value, and whether those prices subsequently correct. It uses a market-model event study (MacKinlay, 1997) to measure cumulative abnormal returns (CARs) over a short event window and buy-and-hold abnormal returns (BHARs) over a longer post-event window, and it adds a cross-sectional regression and a set of robustness checks.
+The thesis runs a market-model event study (MacKinlay, 1997) on elevated-attention
+events from r/WallStreetBets between January 2020 and February 2021, covering seven
+tickers: AMC, BB, GME, NOK, PLTR, SPCE, TSLA.
 
-## Method in brief
-
-1. **Ticker selection.** All r/WallStreetBets post titles are scanned for dollar-sign mentions (e.g. `$GME`). A post counts once per ticker, and only the dollar-sign form is matched. Tickers with at least 500 mentions over the sample period are kept, and tokens that are not U.S. common equity in CRSP (ETFs, crypto, delisted or foreign issuers) are excluded. This yields a final universe of seven tickers: AMC, BB, GME, NOK, PLTR, SPCE, TSLA.
-2. **Event identification.** A stock-day is an elevated-attention event if its mention count exceeds the rolling 90th percentile of that stock's own mentions over the prior 250 trading days (Hasso et al., 2022). Consecutive days are grouped into one event, and a minimum gap of 65 trading days is enforced.
-3. **Abnormal returns.** For each event the market model is estimated by OLS over the window `[t-260, t-11]`, and CARs `[0, +5]` and BHARs `[+6, +60]` are computed relative to the CRSP value-weighted market return.
-4. **Cross-sectional regression.** The event-level CARs and BHARs are regressed on event-day attention, pre-event volatility, and firm size, using heteroskedasticity-robust (White) standard errors.
-5. **Robustness.** The short-run result is re-checked with a calendar-time portfolio (to remove cross-sectional dependence) and a bootstrap (to handle return skewness).
-
-## Repository structure
+## Repository contents
 
 | File | Description |
 | --- | --- |
-| `wsb_ticker_selection.py` | Builds the ticker universe from the Reddit data. |
-| `wsb_pipeline_final.py` | Runs the full event study, cross-sectional regressions, and robustness checks, and exports the results and the event-time figure. |
+| `wsb_ticker_selection.py` | Screens the ticker universe from the raw Reddit posts (dollar-sign mentions, at least 500, U.S. common equity only). Writes `candidate_tickers.csv`. |
+| `wsb_event_study.py` | Builds daily mention counts, identifies elevated-attention events, runs the event study (CAR [0,+5], BHAR [+6,+60]), the robustness checks (calendar-time portfolio, bootstrap, excluding GameStop) and draws Figures 1 and 2. |
+| `wsb_mentions_daily.csv` | Derived snapshot: distinct posts per ticker-day (901 rows, weekends included). |
+| `wsb_events.csv` | Derived snapshot: the 21 identified events. |
+| `candidate_tickers.csv` | Output of the universe screen, with exclusion reasons. |
 | `requirements.txt` | Python dependencies. |
 
-## Data
+## Data you need to obtain yourself
 
-The data files are not included in this repository because of their size and licensing.
+**1. Raw Reddit posts (optional).** The raw file `r_wallstreetbets_posts.csv` comes
+from the Kaggle dataset "Reddit WallStreetBets Posts" (Fontes, 2021). It is about
+220 MB and holds 1.12 million posts, of which 864,273 fall in the sample window.
+It is only needed to rebuild the mention counts from scratch or to rerun the
+universe screen. The event study runs without it: if the raw file is absent,
+`wsb_event_study.py` loads the included snapshot `wsb_mentions_daily.csv` instead.
+Both routes give identical results.
 
-- **Reddit data:** `r_wallstreetbets_posts.csv` from the [Kaggle r/WallStreetBets dataset](https://www.kaggle.com/datasets/unanimad/reddit-rwallstreetbets) (Fontes, 2021).
-- **Stock returns:** `crsp_returns.csv` — CRSP Daily Stock File via WRDS, with columns `ticker, date, ret, prc, shrout` for the seven tickers, 2019-01-01 to 2021-03-01.
-- **Market return:** `crsp_market.csv` — CRSP Daily Stock File Indexes via WRDS, with the value-weighted market return `vwretd`.
+**2. CRSP return data (required).** The CRSP files are licensed through WRDS and are
+not redistributed in this repository. Download them yourself with a WRDS account:
 
-Place all three CSV files in the repository root before running.
+* `crsp_returns.csv`: CRSP Daily Stock File, 2019-01-01 to 2021-03-01, for the
+  tickers AMC, BB, GME, IPOA, NOK, PLTR, SPCE and TSLA, with at least the columns
+  `date`, `TICKER` and `RET`. SPCE traded as IPOA before its 2019 merger; the code
+  renames IPOA to SPCE.
+* `crsp_market.csv`: CRSP Index File (daily), same period, with the column `vwretd`
+  (value-weighted market return including dividends).
 
-## Usage
+Column names are lowercased by the code, so capitalisation does not matter.
+**Do not commit the CRSP files to a public repository.** A suitable `.gitignore`:
 
-```bash
-pip install -r requirements.txt
-
-python wsb_ticker_selection.py    # builds candidate_tickers.csv
-python wsb_pipeline_final.py      # runs the event study and robustness checks
+```
+r_wallstreetbets_posts.csv
+crsp_returns.csv
+crsp_market.csv
+__pycache__/
 ```
 
-The pipeline writes `thesis_results.csv`, `thesis_results.xlsx`, `regression_results.csv`, `robustness_results.csv`, and `figure1_eventtime.png`.
+## How to run
 
-## Main results
+```
+pip install -r requirements.txt
+python wsb_ticker_selection.py   # optional, needs the raw Kaggle file
+python wsb_event_study.py        # uses the raw file if present, else the snapshot
+```
 
-| Measure | Window | N | Mean | t-statistic | p-value |
-| --- | --- | --- | --- | --- | --- |
-| CAR | [0, +5] | 19 | +9.58% | +2.083 | 0.052 |
-| BHAR | [+6, +60] | 14 | +15.56% | +1.266 | 0.228 |
+`wsb_event_study.py` prints Tables 1 to 5 and writes `thesis_results.csv` (the
+per-event results), `figure1_eventtime.png`, `figure2_decomposition.png` and
+refreshed copies of the two snapshot CSVs.
 
-The positive CAR is consistent with short-run, sentiment-driven price inflation, and it remains significant under a calendar-time portfolio (p = 0.053) and a bootstrap that accounts for return skewness (p = 0.032). The BHAR shows no significant reversal within the 60-day window under any method, which is consistent with short-squeeze dynamics sustaining elevated prices.
+## Reproducibility notes
 
-## References
-
-- Fontes, R. (2021). *Reddit – r/WallStreetBets* [Dataset]. Kaggle.
-- Hasso, T., Müller, D., Pelster, M., & Warkulat, S. (2022). Who participated in the GameStop frenzy? *Finance Research Letters, 45*, 102140.
-- MacKinlay, A. C. (1997). Event studies in economics and finance. *Journal of Economic Literature, 35*(1), 13–39.
+* **End-to-end check.** Rebuilding everything from the raw Kaggle file reproduces
+  `candidate_tickers.csv`, `wsb_mentions_daily.csv`, `wsb_events.csv` and
+  `thesis_results.csv` exactly, byte for byte.
+* **Two mention totals.** `wsb_ticker_selection.py` counts mention occurrences
+  (GME: 15,679). The event study counts distinct posts per ticker-day
+  (GME: 15,344). Both are correct; they answer different questions. The thesis
+  reports the post counts.
+* **Weekday grid.** Weekend mentions are present in `wsb_mentions_daily.csv` and
+  in the reported totals, but events are identified on a Monday to Friday grid,
+  so weekend mentions do not enter the threshold or the event definition. When a
+  flagged day falls on a market holiday, the first trading day after it serves
+  as event day 0.
+* **Gap rule.** The minimum spacing of 65 days between same-ticker events is
+  measured in weekdays, which include market holidays.
+* **Seed.** The bootstrap uses a fixed seed (42), so the reported p-values and
+  confidence intervals reproduce exactly.
+* **Verified environment.** Results were verified with numpy 2.4.4, pandas 3.0.2,
+  scipy 1.17.1 and matplotlib 3.10.8. Other recent versions should work.
+* **Headline numbers to expect.** Mean CAR [0,+5]: +9.58% (t = 2.083, p = 0.052),
+  excluding GME: +12.81% (p = 0.032). Mean BHAR [+6,+60]: +15.56% (p = 0.228).
+  Sample: 19 CAR events, 14 BHAR events.
