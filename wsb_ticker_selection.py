@@ -45,6 +45,14 @@ def load_reddit():
 
 
 def count_dollar_mentions(df):
+    """Count dollar-sign mention occurrences per ticker over the whole sample.
+
+    Every occurrence counts: a title that contains $GME twice adds 2 to GME.
+    This is a coarse popularity screen. The event study (wsb_event_study.py)
+    instead counts distinct posts per ticker-day, so its totals are slightly
+    lower (e.g. GME: 15,344 posts vs 15,679 occurrences). Both screens give
+    the same ticker universe.
+    """
     counts = defaultdict(int)
     for title in df["title"]:
         for m in DOLLAR_RE.finditer(str(title).upper()):
@@ -77,3 +85,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
