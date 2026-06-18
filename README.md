@@ -12,7 +12,7 @@ tickers: AMC, BB, GME, NOK, PLTR, SPCE, TSLA.
 | File | Description |
 | --- | --- |
 | `wsb_ticker_selection.py` | Screens the ticker universe from the raw Reddit posts (dollar-sign mentions, at least 500, U.S. common equity only). Writes `candidate_tickers.csv`. |
-| `wsb_event_study.py` | Builds daily mention counts, identifies elevated-attention events, runs the event study (CAR [0,+5], BHAR [+6,+60]), the robustness checks (calendar-time portfolio, bootstrap, excluding GameStop) and draws Figures 1 and 2. |
+| `wsb_event_study.py` | Builds the daily mention counts, identifies the elevated-attention events, estimates the market model, computes CAR [0,+5] and BHAR [+6,+60], runs the robustness checks (calendar-time portfolio, bootstrap, standardised cross-sectional and sign tests, alternative windows, excluding GameStop), prints Tables 1 to 9 and the worked example from Appendix A, and draws Figures 1 and 2. |
 | `wsb_mentions_daily.csv` | Derived snapshot: distinct posts per ticker-day (901 rows, weekends included). |
 | `wsb_events.csv` | Derived snapshot: the 21 identified events. |
 | `candidate_tickers.csv` | Output of the universe screen, with exclusion reasons. |
@@ -51,9 +51,9 @@ python wsb_ticker_selection.py   # optional, needs the raw Kaggle file
 python wsb_event_study.py        # uses the raw file if present, else the snapshot
 ```
 
-`wsb_event_study.py` prints Tables 1 to 5 and writes `thesis_results.csv` (the
-per-event results), `figure1_eventtime.png`, `figure2_decomposition.png` and
-refreshed copies of the two snapshot CSVs.
+`wsb_event_study.py` prints Tables 1 to 9 and the Appendix A worked example, and
+writes `thesis_results.csv` (the per-event results), `figure1_eventtime.png`,
+`figure2_decomposition.png` and refreshed copies of the two snapshot CSVs.
 
 ## Reproducibility notes
 
