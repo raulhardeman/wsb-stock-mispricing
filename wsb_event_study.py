@@ -444,8 +444,7 @@ def report_alternative_tests(res, crsp):
     report_robustness(res, crsp, "full sample")
 
     print("\nTable 7 - Alternative significance tests for the mean CAR [0, +5]")
-    groups = [("Full sample", res)] + [(t, res[res["ticker"] == t]) for t in TICKERS] \
-             + [("Excluding GME", res[res["ticker"] != DROP_TICKER])]
+    groups = [("Full sample", res)] + [(t, res[res["ticker"] == t]) for t in TICKERS]
     for name, sub in groups:
         n_s, t_s, p_s = standardised_cross_sectional(sub, crsp)
         n_g, n_pos, z, p_g = generalised_sign(sub, crsp)
