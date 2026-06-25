@@ -1,7 +1,6 @@
 # Social Media Attention and Stock Mispricing: Evidence from r/WallStreetBets
 
-Replication code and derived data for the bachelor thesis by Raul Hardeman
-(Erasmus School of Economics, BSc Economics & Business Economics, June 2026).
+This repositiory contains the scripts used for the Bachelor thesis by Raul Hardeman (Erasmus School of Economics, 2026).
 
 The thesis runs a market-model event study (MacKinlay, 1997) on elevated-attention
 events from r/WallStreetBets between January 2020 and February 2021, covering seven
@@ -52,18 +51,17 @@ python wsb_event_study.py        # uses the raw file if present, else the snapsh
 ```
 
 `wsb_event_study.py` prints Tables 1 to 9 and the Appendix A worked example, and
-writes `thesis_results.csv` (the per-event results), `figure1_eventtime.png`,
-`figure2_decomposition.png` and refreshed copies of the two snapshot CSVs.
+writes `thesis_results.csv`, `figure1_eventtime.png`, `figure2_decomposition.png`, 
+and refreshed copies of the two snapshot CSVs.
 
 ## Reproducibility notes
 
 * **End-to-end check.** Rebuilding everything from the raw Kaggle file reproduces
   `candidate_tickers.csv`, `wsb_mentions_daily.csv`, `wsb_events.csv` and
-  `thesis_results.csv` exactly, byte for byte.
+  `thesis_results.csv`.
 * **Two mention totals.** `wsb_ticker_selection.py` counts mention occurrences
   (GME: 15,679). The event study counts distinct posts per ticker-day
-  (GME: 15,344). Both are correct; they answer different questions. The thesis
-  reports the post counts.
+  (GME: 15,344). The thesis reports the post counts.
 * **Weekday grid.** Weekend mentions are present in `wsb_mentions_daily.csv` and
   in the reported totals, but events are identified on a Monday to Friday grid,
   so weekend mentions do not enter the threshold or the event definition. When a
