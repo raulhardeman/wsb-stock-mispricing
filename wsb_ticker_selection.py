@@ -1,5 +1,6 @@
 """
-WSB ticker selection — Bachelor thesis: Social Media Attention and Stock Mispricing.
+Social Media Attention and Stock Mispricing: Evidence from r/WallStreetBets.
+Bachelor thesis, Raul Hardeman (Erasmus School of Economics, 2026).
 
 Builds the ticker universe organically from the data: scans r/WallStreetBets post
 titles for dollar-sign mentions (e.g. $GME), keeps tickers above a mention threshold,
