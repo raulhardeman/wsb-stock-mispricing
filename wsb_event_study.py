@@ -33,19 +33,6 @@ Outputs: thesis_results.csv (per-event results), wsb_mentions_daily.csv and
          wsb_events.csv (derived snapshots), figure1_eventtime.png and
          figure2_decomposition.png.
 Usage:   python wsb_event_study.py
-Depends: numpy, pandas, scipy (matplotlib optional, for the figures).
-
-Reproducibility:
-  * Mention counts are distinct posts per ticker-day: a title naming a ticker
-    twice counts once. The bootstrap uses a fixed seed, so all p-values and
-    confidence intervals reproduce exactly.
-  * Events are placed on a Monday-to-Friday grid. Weekend mentions appear in the
-    snapshot and the totals but do not enter the threshold or the event
-    definition. A flagged day on a market holiday takes the next trading day as
-    event day 0. The minimum spacing between same-ticker events is measured on
-    that weekday grid.
-  * If the raw Reddit file is absent, the snapshot is used instead; both routes
-    give identical results.
 """
 
 import sys
@@ -61,7 +48,7 @@ try:
 except ImportError:
     HAS_MATPLOTLIB = False
 
-# --- Files -----------------------------------------------------------------
+# Files
 REDDIT_CSV     = "r_wallstreetbets_posts.csv"   # raw Kaggle posts (optional)
 CRSP_CSV       = "crsp_returns.csv"             # CRSP daily stock file (WRDS)
 MARKET_CSV     = "crsp_market.csv"              # CRSP value-weighted index (WRDS)
@@ -71,20 +58,20 @@ RESULTS_CSV    = "thesis_results.csv"           # per-event results
 FIG_EVENTTIME  = "figure1_eventtime.png"
 FIG_DECOMP     = "figure2_decomposition.png"
 
-# --- Sample and universe ---------------------------------------------------
+# Sample and universe
 SAMPLE_START = "2020-01-01"
 SAMPLE_END   = "2021-02-16"
 TICKERS       = ["AMC", "BB", "GME", "NOK", "PLTR", "SPCE", "TSLA"]
 TICKER_RENAME = {"IPOA": "SPCE"}   # SPCE traded as IPOA in CRSP before its 2019 merger
 DROP_TICKER   = "GME"              # excluded in the robustness check (Table 9)
 
-# --- Event identification (Hasso et al., 2022) -----------------------------
+# Event identification (Hasso et al., 2022)
 PERCENTILE   = 0.90   # rolling percentile threshold
 LOOKBACK     = 250    # lookback window (weekdays)
 MIN_OBS      = 30     # min prior observations before computing the threshold
 MIN_GAP_DAYS = 65     # min spacing between same-ticker events (weekdays)
 
-# --- Market model (MacKinlay, 1997) ----------------------------------------
+# Market model (MacKinlay, 1997)
 EST_WINDOW  = 250     # estimation window length (trading days)
 EST_GAP     = 10      # gap between estimation window and event date
 MIN_EST_OBS = 100     # min observations to estimate the model
@@ -92,11 +79,11 @@ CAR_END     = 5       # CAR window [0, +5]
 BHAR_START  = 6       # BHAR window [+6, +60]
 BHAR_END    = 60
 
-# --- Inference -------------------------------------------------------------
+# Inference
 N_BOOTSTRAP = 10000   # bootstrap resamples
 BOOT_SEED   = 42      # bootstrap RNG seed
 
-# Alternative windows reported in Table 8.
+# Alternative windows reported in Table 8
 CAR_WINDOWS  = {"[0,+1]": (0, 1), "[0,+3]": (0, 3), "[0,+5] (baseline)": (0, 5),
                 "[0,+10]": (0, 10), "[-1,+1]": (-1, 1), "[-5,+5]": (-5, 5)}
 BHAR_WINDOWS = {"[+6,+30]": (6, 30), "[+6,+60] (baseline)": (6, 60),
@@ -104,9 +91,8 @@ BHAR_WINDOWS = {"[+6,+30]": (6, 30), "[+6,+60] (baseline)": (6, 60),
 EXAMPLE_TICKER = "BB"   # event used for the worked example in Appendix A
 
 
-# =========================================================================== #
+
 # Data loading and event identification
-# =========================================================================== #
 def build_mentions(reddit_csv):
     """Daily mentions per ticker = number of distinct posts naming it ($TICKER)."""
     df = pd.read_csv(reddit_csv, low_memory=False)
@@ -199,10 +185,7 @@ def load_crsp():
     crsp = crsp.merge(mkt, on="date", how="left").dropna(subset=["ret", "mkt_ret"])
     return crsp.sort_values(["ticker", "date"]).reset_index(drop=True)
 
-
-# =========================================================================== #
-# Event-study core
-# =========================================================================== #
+# Event study
 def _locate(crsp, ticker, event_date):
     """Return (indexed stock frame, date list, row position of the event day)."""
     stock = crsp[crsp["ticker"] == ticker].set_index("date").sort_index()
@@ -276,10 +259,7 @@ def bhar_over(row, crsp, start, end):
     seg = stock.iloc[pos + start:pos + end + 1]
     return float((1 + seg["ret"]).prod() - (1 + seg["mkt_ret"]).prod())
 
-
-# =========================================================================== #
-# Inference
-# =========================================================================== #
+# Statistics
 def ttest(series):
     """One-sample t-test against zero. Returns (N, mean, t, p) with NaNs if N < 2."""
     s = series.dropna()
@@ -375,10 +355,7 @@ def generalised_sign(subset, crsp):
     z = (n_pos - n * phat) / np.sqrt(n * phat * (1 - phat))
     return n, n_pos, float(z), float(2 * (1 - stats.norm.cdf(abs(z))))
 
-
-# =========================================================================== #
 # Reporting
-# =========================================================================== #
 def _stars(p):
     return "***" if p < 0.01 else "**" if p < 0.05 else "*" if p < 0.10 else ""
 
@@ -488,10 +465,7 @@ def report_worked_example(res, crsp):
     print(seg.round(4).to_string())
     print(f"  Sum of abnormal returns = CAR[0,+5] = {ex['car_0_5']*100:+.2f}%")
 
-
-# =========================================================================== #
 # Figures
-# =========================================================================== #
 def plot_event_time(res, crsp):
     """Figure 1: cumulative average abnormal return from day -5 to +60."""
     if not HAS_MATPLOTLIB:
@@ -574,9 +548,8 @@ def plot_decomposition(res):
     plt.close(fig)
 
 
-# =========================================================================== #
-# Main
-# =========================================================================== #
+
+
 def main():
     crsp = load_crsp()
     mentions = load_mentions()
